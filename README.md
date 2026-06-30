@@ -65,10 +65,12 @@ during implementation._
 
 ## API
 
-- `POST /submit` — submit text; returns attribution result, confidence, label text,
-  `content_id`, and per-signal breakdown.
-- `POST /appeal/<content_id>` — contest a classification; captures reasoning, logs it
-  beside the original decision, sets status to `under review`.
+- `POST /submit` — JSON body with `text` and `creator_id` (required), optional
+  `title`; returns attribution result, confidence, label text, `content_id`, and
+  per-signal breakdown.
+- `POST /appeal/<content_id>` — contest a classification; JSON body with `creator_id`
+  (must match the original) and `reason`; captures reasoning, logs it beside the
+  original decision, sets status to `under review`.
 - `GET /log` — structured audit log of all decisions and appeals.
 
 _Request/response examples: to be filled in during implementation._

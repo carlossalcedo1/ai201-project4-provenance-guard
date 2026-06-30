@@ -16,8 +16,8 @@ label they see back — and later, if they contest it, through the appeal into t
 audit log. Every component it touches is named.
 
 1. **A creator submits text.** They send `POST /submit` with a JSON body containing
-   the `text` (a poem, story excerpt, or blog post) and optional metadata
-   (`title`, `author`).
+   the `text` (a poem, story excerpt, or blog post) and `creator_id` (who is
+   submitting — used later to authorize appeals), plus optional `title`.
 
 2. **The rate limiter checks them first.** `flask-limiter` inspects the caller (by
    IP) *before* any work happens. Over the limit → `429 Too Many Requests`, and the
@@ -70,7 +70,7 @@ audit log. Every component it touches is named.
 ### Diagram
 
 ```
-                         POST /submit  { text, title?, author? }
+                    POST /submit  { text, creator_id, title? }
                                   │
                                   ▼
                     ┌─────────────────────────────┐
@@ -113,7 +113,7 @@ audit log. Every component it touches is named.
         │   GET /log  ──▶ structured audit log             │      status="under review",
         └─────────────────────┬───────────────────────────┘      logged beside original)
                               ▼
-              JSON response: result, confidence, label, content_id, breakdown
+    JSON response: content_id, creator_id, attribution, confidence, label, breakdown
 ```
 
 ---
@@ -252,20 +252,23 @@ copies in the README** — README is the canonical record; this is the design so
 
 ## Appeals workflow
 
-- **Who can submit an appeal:** the content creator (or anyone holding the
-  `content_id` returned at submission). There is no login system in this project, so
-  possession of the `content_id` is the authorization — documented as a known
-  limitation, not a real auth model.
+- **Who can submit an appeal:** the original content creator. The appeal must carry
+  the `creator_id` that was used at submission; it must match the one stored on the
+  original decision. There is no full login system in this project, so a matching
+  `creator_id` is the lightweight authorization — documented as a known limitation,
+  not a real auth model.
 - **What they provide:** `POST /appeal/<content_id>` with a JSON body containing
-  `reason` (required, free text — their argument for why the classification is wrong)
-  and optional `claimed_origin` (`"human"` or `"ai"` — what they say it actually is).
+  `creator_id` (required, must match the original), `reason` (required, free text —
+  their argument for why the classification is wrong), and optional `claimed_origin`
+  (`"human"` or `"ai"` — what they say it actually is).
 - **What the system does on receipt:**
   1. Look up the original decision by `content_id`; `404` if it doesn't exist.
-  2. Append an appeal record (reason, claimed_origin, timestamp) to that decision.
-  3. Change the decision's `status` from `"classified"` to `"under review"`.
-  4. Write a new **audit-log entry** of type `appeal` that references the original
+  2. Reject with `403` if the `creator_id` doesn't match the original submission.
+  3. Append an appeal record (reason, claimed_origin, timestamp) to that decision.
+  4. Change the decision's `status` from `"classified"` to `"under review"`.
+  5. Write a new **audit-log entry** of type `appeal` that references the original
      `content_id` and copies the original verdict/scores, so the trail is intact.
-  5. Return the updated record. **No automated re-classification** — a human decides.
+  6. Return the updated record. **No automated re-classification** — a human decides.
 - **What a human reviewer sees in the appeal queue** (`GET /log` filtered to
   `status = "under review"`, or a future `GET /appeals` view): for each appealed item
   — the `content_id`, the original text excerpt, the original verdict + `p_ai` +
