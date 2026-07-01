@@ -46,8 +46,10 @@ def record_decision(
     content_id: str,
     creator_id: str,
     attribution: str,
+    combined_score: float,
     confidence: float,
     structural_score: float,
+    llm_score: float | None = None,
     status: str = "classified",
 ) -> dict:
     """Append one classification decision to the audit log and return the entry."""
@@ -55,9 +57,11 @@ def record_decision(
         "content_id": content_id,
         "creator_id": creator_id,
         "timestamp": _utc_now_iso(),
-        "attribution": attribution,
-        "confidence": confidence,
-        "structural_score": structural_score,  # Signal 1 score (LLM score added in M4)
+        "attribution": attribution,            # combined verdict
+        "combined_score": combined_score,      # fused p_ai (both signals combined)
+        "confidence": confidence,              # combined confidence
+        "structural_score": structural_score,  # Signal 1 (structural) score
+        "llm_score": llm_score,                # Signal 2 (LLM judge) score
         "status": status,
     }
     entries = _read_all()

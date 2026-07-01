@@ -1,15 +1,12 @@
 """Provenance Guard — Flask application.
 
-M3 skeleton: the POST /submit route, input validation, and the JSON response
-shape from planning.md > Architecture. The first detection signal (Signal A —
-structural) is wired in; the rest of the pipeline is stubbed with TODOs that
-name the milestone that fills them:
+POST /submit runs the full two-signal detection pipeline (structural + LLM
+judge), fuses them into a verdict + confidence (planning.md > Uncertainty
+representation), and writes a structured audit entry. GET /log surfaces the log.
 
-    M4 -> Signal B (LLM judge), fusion, real confidence + verdict
-    M5 -> transparency labels, /appeal endpoint, audit log, rate limiting
-
-The response intentionally already has the final shape (result, confidence,
-label, content_id, breakdown) so callers don't have to change when M4/M5 land.
+Still stubbed for M5:
+    - the transparency label is a placeholder (real text in M5)
+    - the /appeal endpoint and flask-limiter rate limiting
 """
 
 from __future__ import annotations
@@ -19,19 +16,18 @@ import uuid
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
+import pipeline
 import store
-from signals import structural
 
-load_dotenv()  # GROQ_API_KEY (used by Signal B in M4); harmless here
+load_dotenv()  # GROQ_API_KEY for Signal B (LLM judge)
 
 app = Flask(__name__)
 
 # --- Input validation bounds (planning.md > Architecture, step 3) -------------
 MIN_WORDS = 5        # below this the structural signal has nothing to measure
-MAX_CHARS = 20_000   # bounds abuse and (in M4) LLM cost
+MAX_CHARS = 20_000   # bounds abuse and LLM cost
 
-# Placeholders until the real pipeline lands (see planning.md milestones).
-PLACEHOLDER_CONFIDENCE = 0.5  # TODO(M4): replace with fused confidence
+# Placeholder until the label builder lands in M5.
 PLACEHOLDER_LABEL = "[placeholder — final transparency label added in M5]"
 
 # TODO(M5): wrap /submit with flask-limiter using the limits documented in README.
@@ -41,26 +37,12 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
-def _provisional_attribution(p_ai: float) -> str:
-    """Single-signal, provisional attribution from Signal A only (M3).
-
-    Mirrors the directional thresholds in planning.md (>=0.65 ai, <=0.35 human,
-    else uncertain) so the response is meaningful now. M4 fusion replaces this
-    with the real cross-signal verdict.
-    """
-    if p_ai >= 0.65:
-        return "likely_ai"
-    if p_ai <= 0.35:
-        return "likely_human"
-    return "uncertain"
-
-
 @app.post("/submit")
 def submit():
     """Accept text for attribution analysis and return a structured result.
 
-    M3 returns Signal A's score in the breakdown. `confidence`, `verdict`, and
-    `label` are provisional placeholders until fusion (M4) and labels (M5).
+    Returns the fused attribution + real confidence; `label` stays a placeholder
+    until M5.
     """
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -79,33 +61,29 @@ def submit():
     if len(text) > MAX_CHARS:
         return jsonify({"error": f"'text' must be at most {MAX_CHARS} characters"}), 400
 
-    # --- Detection: Signal A (structural). Signal B + fusion arrive in M4. -----
-    signal_a = structural.analyze(text)
+    # --- Detection: both signals, fused (planning.md > Uncertainty rep.) -------
+    result = pipeline.analyze(text)
 
     content_id = str(uuid.uuid4())
 
-    # Provisional attribution from Signal A alone; M4 fusion makes it final.
-    attribution = _provisional_attribution(signal_a["p_ai"])
-
     response = {
         "content_id": content_id,
-        "creator_id": creator_id,             # echoed back; persisted to audit log in M5
-        "attribution": attribution,           # from Signal A only until M4 fusion
-        "confidence": PLACEHOLDER_CONFIDENCE,  # TODO(M4): real confidence from fusion
+        "creator_id": creator_id,             # echoed back; persisted to audit log
+        "attribution": result["attribution"],
+        "confidence": result["confidence"],
         "label": PLACEHOLDER_LABEL,            # TODO(M5): real transparency label text
-        "breakdown": {
-            "structural": signal_a,
-            # TODO(M4): "llm_judge": {...}
-        },
+        "breakdown": result["breakdown"],
     }
 
-    # Audit log: every submission writes one structured entry (M4 adds llm_score).
+    # Audit log: one structured entry per submission.
     store.record_decision(
         content_id=content_id,
         creator_id=creator_id,
-        attribution=attribution,
-        confidence=PLACEHOLDER_CONFIDENCE,
-        structural_score=signal_a["p_ai"],
+        attribution=result["attribution"],
+        combined_score=result["p_ai"],
+        confidence=result["confidence"],
+        structural_score=result["breakdown"]["structural"]["p_ai"],
+        llm_score=result["breakdown"]["llm_judge"]["p_ai"],
         status="classified",
     )
 

@@ -13,8 +13,12 @@ Output (per the Uncertainty-representation section):
     evidence : dict            -- the raw measurements behind the score
 
 This signal is deterministic: the same input always yields the same score.
-The thresholds below are initial defaults and will move to config.py and be
-tuned against the fixture set in M4.
+
+M4 calibration note: the score is now PURE burstiness. An earlier version blended
+in a type-token-ratio (TTR) sub-score, but across real inputs TTR sat at ~0
+contribution (TTR is almost always high) and only diluted burstiness and capped
+the max score. TTR is still computed and reported as evidence, but no longer fed
+into p_ai.
 """
 
 from __future__ import annotations
@@ -22,20 +26,11 @@ from __future__ import annotations
 import re
 import statistics
 
-# --- Tunable constants (initial defaults; will move to config.py in M4) -------
+# --- Tunable constants --------------------------------------------------------
 # Burstiness is measured as the coefficient of variation (CV = std / mean) of
 # sentence lengths. Low CV  -> uniform -> AI-like; high CV -> bursty -> human-like.
 CV_AI_BELOW = 0.25     # CV at/below this maps to p_ai ~ 1.0 (very uniform)
 CV_HUMAN_ABOVE = 0.70  # CV at/above this maps to p_ai ~ 0.0 (very bursty)
-
-# Type-token ratio (unique words / total words). Low TTR -> repetitive -> mildly
-# AI-leaning; high TTR -> diverse vocabulary -> human-leaning. Weaker, weighted low.
-TTR_AI_BELOW = 0.40
-TTR_HUMAN_ABOVE = 0.70
-
-# Blend weights: burstiness is the primary feature, TTR is a weak supporting one.
-W_BURST = 0.7
-W_TTR = 0.3
 
 # Below this many sentences, burstiness is meaningless (planning.md blind spot:
 # "Short texts have too few sentences for variance to mean anything").
@@ -98,19 +93,14 @@ def analyze(text: str) -> dict:
             },
         }
 
-    # --- Feature 1: burstiness (coefficient of variation of sentence lengths) ---
+    # --- Burstiness: coefficient of variation of sentence lengths --------------
     mean_len = statistics.mean(sentence_lengths)
     std_len = statistics.pstdev(sentence_lengths)  # population std (deterministic)
     cv = (std_len / mean_len) if mean_len else 0.0
-    burst_p_ai = _linear_map(cv, CV_AI_BELOW, CV_HUMAN_ABOVE)
+    p_ai = max(0.0, min(1.0, _linear_map(cv, CV_AI_BELOW, CV_HUMAN_ABOVE)))
 
-    # --- Feature 2: lexical diversity (type-token ratio) ------------------------
+    # Type-token ratio: reported for transparency, NOT scored (see module note).
     ttr = len(set(words)) / len(words)
-    ttr_p_ai = _linear_map(ttr, TTR_AI_BELOW, TTR_HUMAN_ABOVE)
-
-    # --- Blend into a single probability ---------------------------------------
-    p_ai = W_BURST * burst_p_ai + W_TTR * ttr_p_ai
-    p_ai = max(0.0, min(1.0, p_ai))
 
     return {
         "signal": "structural",
@@ -121,9 +111,7 @@ def analyze(text: str) -> dict:
             "word_count": len(words),
             "mean_sentence_length": round(mean_len, 2),
             "sentence_length_cv": round(cv, 4),
-            "type_token_ratio": round(ttr, 4),
-            "burstiness_subscore": round(burst_p_ai, 4),
-            "ttr_subscore": round(ttr_p_ai, 4),
+            "type_token_ratio": round(ttr, 4),  # informational only
         },
     }
 
