@@ -15,7 +15,10 @@ import uuid
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
+import labels
 import pipeline
 import store
 
@@ -23,21 +26,33 @@ load_dotenv()  # GROQ_API_KEY for Signal B (LLM judge)
 
 app = Flask(__name__)
 
+# Rate limiting: protect /submit because every call triggers a cost-bearing Groq
+# request. Keyed by client IP; in-memory storage is fine for this single-process
+# dev/grading setup. Chosen limits + reasoning are documented in the README.
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
+SUBMIT_RATE_LIMIT = "10 per minute;100 per day"
+
 # --- Input validation bounds (planning.md > Architecture, step 3) -------------
 MIN_WORDS = 5        # below this the structural signal has nothing to measure
 MAX_CHARS = 20_000   # bounds abuse and LLM cost
-
-# Placeholder until the label builder lands in M5.
-PLACEHOLDER_LABEL = "[placeholder — final transparency label added in M5]"
-
-# TODO(M5): wrap /submit with flask-limiter using the limits documented in README.
 
 
 def _word_count(text: str) -> int:
     return len(text.split())
 
 
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({"error": "rate limit exceeded", "detail": str(e.description)}), 429
+
+
 @app.post("/submit")
+@limiter.limit(SUBMIT_RATE_LIMIT)
 def submit():
     """Accept text for attribution analysis and return a structured result.
 
@@ -71,7 +86,7 @@ def submit():
         "creator_id": creator_id,             # echoed back; persisted to audit log
         "attribution": result["attribution"],
         "confidence": result["confidence"],
-        "label": PLACEHOLDER_LABEL,            # TODO(M5): real transparency label text
+        "label": labels.build_label(result["attribution"], result["confidence"]),
         "breakdown": result["breakdown"],
     }
 
@@ -88,6 +103,49 @@ def submit():
     )
 
     return jsonify(response), 200
+
+
+@app.post("/appeal")
+def appeal():
+    """Contest a classification (planning.md > Appeals workflow).
+
+    Body: content_id (required), creator_reasoning (required), optional creator_id
+    (enforced only if supplied), optional claimed_origin ("human"/"ai"). On success
+    the decision's status flips to "under_review" and the appeal is logged beside
+    it. No automated re-classification — a human reviews.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "request body must be JSON"}), 400
+
+    content_id = data.get("content_id")
+    creator_reasoning = data.get("creator_reasoning") or data.get("reason")
+    creator_id = data.get("creator_id")  # optional
+    claimed_origin = data.get("claimed_origin")
+    if not isinstance(content_id, str) or not content_id.strip():
+        return jsonify({"error": "'content_id' is required"}), 400
+    if not isinstance(creator_reasoning, str) or not creator_reasoning.strip():
+        return jsonify({"error": "'creator_reasoning' is required"}), 400
+    if claimed_origin is not None and claimed_origin not in ("human", "ai"):
+        return jsonify({"error": "'claimed_origin' must be 'human' or 'ai'"}), 400
+
+    result = store.record_appeal(
+        content_id=content_id,
+        creator_reasoning=creator_reasoning,
+        creator_id=creator_id,
+        claimed_origin=claimed_origin,
+    )
+    if result is None:
+        return jsonify({"error": "no decision found for that content_id"}), 404
+    if result == store.FORBIDDEN:
+        return jsonify({"error": "creator_id does not match the original submission"}), 403
+
+    return jsonify({
+        "message": "appeal received",
+        "content_id": content_id,
+        "status": result["status"],
+        "appeal_reasoning": creator_reasoning,
+    }), 200
 
 
 @app.get("/log")

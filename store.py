@@ -54,6 +54,7 @@ def record_decision(
 ) -> dict:
     """Append one classification decision to the audit log and return the entry."""
     entry = {
+        "type": "classification",
         "content_id": content_id,
         "creator_id": creator_id,
         "timestamp": _utc_now_iso(),
@@ -68,6 +69,79 @@ def record_decision(
     entries.append(entry)
     _write_all(entries)
     return entry
+
+
+def get_decision(content_id: str) -> dict | None:
+    """Return the classification entry for `content_id`, or None if not found."""
+    for entry in _read_all():
+        if entry.get("type") == "classification" and entry.get("content_id") == content_id:
+            return entry
+    return None
+
+
+# Sentinel returned by record_appeal when the creator_id doesn't match.
+FORBIDDEN = "forbidden"
+
+
+def record_appeal(
+    *,
+    content_id: str,
+    creator_reasoning: str,
+    creator_id: str | None = None,
+    claimed_origin: str | None = None,
+):
+    """Log an appeal against an existing decision.
+
+    Returns:
+        None          if no classification exists for `content_id` (-> 404)
+        FORBIDDEN     if `creator_id` is supplied but doesn't match (-> 403)
+        the updated decision dict on success (-> 200)
+
+    On success it (a) appends the appeal to the decision and flips its status to
+    "under_review", and (b) writes a separate audit entry of type "appeal" that
+    references the original decision and copies its verdict/scores.
+    """
+    entries = _read_all()
+    decision = next(
+        (e for e in entries
+         if e.get("type") == "classification" and e.get("content_id") == content_id),
+        None,
+    )
+    if decision is None:
+        return None
+    # Optional authorization: enforce a creator_id match only if one was supplied.
+    if creator_id is not None and decision.get("creator_id") != creator_id:
+        return FORBIDDEN
+
+    ts = _utc_now_iso()
+    appeal_record = {
+        "appeal_reasoning": creator_reasoning,
+        "claimed_origin": claimed_origin,
+        "timestamp": ts,
+    }
+
+    # (a) attach to the original decision + change status
+    decision.setdefault("appeals", []).append(appeal_record)
+    decision["status"] = "under_review"
+
+    # (b) separate audit entry referencing the original decision
+    entries.append({
+        "type": "appeal",
+        "content_id": content_id,
+        "creator_id": decision.get("creator_id"),
+        "timestamp": ts,
+        "appeal_reasoning": creator_reasoning,
+        "claimed_origin": claimed_origin,
+        "status": "under_review",
+        "original_attribution": decision.get("attribution"),
+        "original_combined_score": decision.get("combined_score"),
+        "original_confidence": decision.get("confidence"),
+        "original_structural_score": decision.get("structural_score"),
+        "original_llm_score": decision.get("llm_score"),
+    })
+
+    _write_all(entries)
+    return decision
 
 
 def get_log(limit: int = 50) -> list[dict]:

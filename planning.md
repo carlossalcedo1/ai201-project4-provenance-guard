@@ -58,10 +58,10 @@ audit log. Every component it touches is named.
    attribution result, the confidence score, the transparency label text, the
    `content_id`, and a per-signal breakdown for transparency.
 
-9. **(Later) The creator appeals.** If they disagree, they call
-   `POST /appeal/<content_id>` with their reasoning. The appeal handler looks up the
+9. **(Later) The creator appeals.** If they disagree, they call `POST /appeal` with
+   the `content_id` and their `creator_reasoning`. The appeal handler looks up the
    original record, appends the appeal (reasoning + timestamp), flips the record's
-   `status` to `"under review"`, and writes an audit entry that references the
+   `status` to `"under_review"`, and writes an audit entry that references the
    original decision. No automated re-classification — a human reviews it.
 
 10. **Anyone can read the audit log.** `GET /log` returns the structured log of all
@@ -108,9 +108,9 @@ audit log. Every component it touches is named.
                     └─────────────┬───────────────┘
                                   ▼
         ┌─────────────────────────────────────────────────┐
-        │ Audit store (id, scores, signals, label, status) │◀── POST /appeal/<id>
-        │                                                  │     (reasoning →
-        │   GET /log  ──▶ structured audit log             │      status="under review",
+        │ Audit store (id, scores, signals, label, status) │◀── POST /appeal
+        │                                                  │     (content_id+reasoning →
+        │   GET /log  ──▶ structured audit log             │      status="under_review",
         └─────────────────────┬───────────────────────────┘      logged beside original)
                               ▼
     JSON response: content_id, creator_id, attribution, confidence, label, breakdown
@@ -256,25 +256,25 @@ copies in the README** — README is the canonical record; this is the design so
 
 ## Appeals workflow
 
-- **Who can submit an appeal:** the original content creator. The appeal must carry
-  the `creator_id` that was used at submission; it must match the one stored on the
-  original decision. There is no full login system in this project, so a matching
-  `creator_id` is the lightweight authorization — documented as a known limitation,
-  not a real auth model.
-- **What they provide:** `POST /appeal/<content_id>` with a JSON body containing
-  `creator_id` (required, must match the original), `reason` (required, free text —
-  their argument for why the classification is wrong), and optional `claimed_origin`
+- **Who can submit an appeal:** the original content creator. There is no full login
+  system in this project, so authorization is lightweight: an optional `creator_id`
+  in the appeal is enforced against the original decision *if supplied* (mismatch →
+  `403`); without it, possession of the `content_id` suffices. Documented as a known
+  limitation, not a real auth model.
+- **What they provide:** `POST /appeal` with a JSON body containing `content_id`
+  (required), `creator_reasoning` (required, free text — their argument for why the
+  classification is wrong), optional `creator_id`, and optional `claimed_origin`
   (`"human"` or `"ai"` — what they say it actually is).
 - **What the system does on receipt:**
   1. Look up the original decision by `content_id`; `404` if it doesn't exist.
-  2. Reject with `403` if the `creator_id` doesn't match the original submission.
-  3. Append an appeal record (reason, claimed_origin, timestamp) to that decision.
-  4. Change the decision's `status` from `"classified"` to `"under review"`.
+  2. If a `creator_id` is supplied and doesn't match the original, reject with `403`.
+  3. Append an appeal record (appeal_reasoning, claimed_origin, timestamp) to it.
+  4. Change the decision's `status` from `"classified"` to `"under_review"`.
   5. Write a new **audit-log entry** of type `appeal` that references the original
      `content_id` and copies the original verdict/scores, so the trail is intact.
-  6. Return the updated record. **No automated re-classification** — a human decides.
+  6. Return a confirmation. **No automated re-classification** — a human decides.
 - **What a human reviewer sees in the appeal queue** (`GET /log` filtered to
-  `status = "under review"`, or a future `GET /appeals` view): for each appealed item
+  `status = "under_review"`, or a future `GET /appeals` view): for each appealed item
   — the `content_id`, the original text excerpt, the original verdict + `p_ai` +
   confidence, **both signal sub-scores and the LLM rationale** (so they can see *why*
   the system decided), the creator's `reason` and `claimed_origin`, and the
@@ -345,7 +345,7 @@ feed it, what to ask for, and how the output gets verified before it's trusted.
   text), the `POST /appeal/<id>` endpoint, the audit store + `GET /log`, and the
   flask-limiter config on `/submit`.
 - **How to verify:** craft inputs that reach **all three** label variants; submit
-  then appeal one item and confirm its `status` flips to `under review` and an
+  then appeal one item and confirm its `status` flips to `under_review` and an
   `appeal` audit entry appears; hammer `/submit` past the limit and confirm `429`.
 
 ---
