@@ -6,72 +6,52 @@ returns an attribution result, a confidence score, and a plain-language
 **transparency label** for the reader. Creators can **appeal** a classification, and
 every decision and appeal is recorded in a structured **audit log**.
 
-Architecture, the request/appeal flow, and the full design reasoning live in
-[planning.md](./planning.md). This README is the canonical record of the graded
-evidence.
+The full design reasoning lives in [planning.md](./planning.md). This README is the
+canonical record of the graded evidence.
 
 ---
 
-## Contents
+## Architecture overview
 
-- [Setup & running](#setup--running)
-- [API](#api)
-- [Detection signals (and why)](#detection-signals-and-why)
-- [Confidence scoring (and why)](#confidence-scoring-and-why)
-- [Transparency label — the three variants](#transparency-label--the-three-variants-verbatim-text)
-- [Appeals workflow](#appeals-workflow)
-- [Rate limiting](#rate-limiting)
-- [Audit log](#audit-log)
+The path a single submission takes, from input to the transparency label the reader
+sees:
 
----
+1. **Submit.** A creator sends `POST /submit` with `text` and `creator_id`.
+2. **Rate limit.** Flask-Limiter checks the caller (by IP) *before* any work — over
+   the limit → `429`, and the cost-bearing Groq call is never reached.
+3. **Validate.** `app.py` checks the text is present, non-empty, and within length
+   bounds (min words / max chars); invalid → `400`.
+4. **Detect (two signals).** `pipeline.py` runs the same text through two independent
+   detectors: **Signal A — structural** (`signals/structural.py`, deterministic
+   burstiness) and **Signal B — LLM judge** (`signals/llm_judge.py`, Groq). Each
+   returns `p_ai ∈ [0,1]` plus evidence.
+5. **Fuse.** The pipeline combines them into one `p_ai` and a `confidence`
+   (`confidence = distance-from-0.5 × signal-agreement`) and picks a verdict:
+   `likely_ai`, `likely_human`, or `uncertain`.
+6. **Label.** `labels.py` maps the verdict + confidence to one of three plain-language
+   transparency label strings (with the confidence % filled in).
+7. **Log.** `store.py` writes a structured audit entry (both signal scores, combined
+   score, confidence, verdict, status) to `audit_log.json`.
+8. **Respond.** `/submit` returns `content_id`, attribution, confidence, the label,
+   and the per-signal breakdown.
+9. **Appeal (later).** `POST /appeal` with the `content_id` + `creator_reasoning`
+   flips the decision's status to `under_review` and logs the appeal beside it.
+   `GET /log` exposes the whole trail.
 
-## Setup & running
+```
+POST /submit → [rate limit] → [validate] → pipeline ─┬─ Signal A (structural)
+                                                      └─ Signal B (LLM judge)
+                                                            │
+                                          fuse → p_ai + confidence + verdict
+                                                            │
+                              label builder → transparency label + audit log
+                                                            │
+             JSON response ◀───────────────────────────────┘
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-echo "GROQ_API_KEY=your_key_here" > .env   # .env is git-ignored
-flask --app app run --port 5000
+POST /appeal → status = "under_review", appeal logged beside original → GET /log
 ```
 
-Quick check: `curl -s http://127.0.0.1:5000/health` → `{"status":"ok"}`.
-
-> **macOS note:** use `http://127.0.0.1:5000`, not `localhost:5000` — the macOS
-> AirPlay Receiver hijacks port 5000 on `localhost` (returns `403 AirTunes`).
-> Alternatively run on another port (`--port 5050`) or disable AirPlay Receiver.
-
----
-
-## API
-
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /submit` | JSON body with `text` and `creator_id` (required), optional `title`. Returns attribution, confidence, transparency label, `content_id`, and per-signal breakdown. Rate-limited. |
-| `POST /appeal` | JSON body with `content_id` and `creator_reasoning` (required), optional `creator_id`/`claimed_origin`. Logs the appeal beside the original decision and sets status to `under_review`. |
-| `GET /log` | Structured audit log of all decisions and appeals (newest first). |
-| `GET /health` | Liveness check. |
-
-### Example `POST /submit`
-
-```bash
-curl -s -X POST http://127.0.0.1:5000/submit \
-  -H "Content-Type: application/json" \
-  -d '{"text":"...", "creator_id":"me"}' | python -m json.tool
-```
-
-```json
-{
-  "content_id": "52a0d9cf-55b1-4e28-ad71-b2bf3e2f2fb6",
-  "creator_id": "blogger-x",
-  "attribution": "likely_ai",
-  "confidence": 0.64,
-  "label": "🤖 Likely AI-Generated — ... (confidence: 64%). ...",
-  "breakdown": {
-    "structural": {"signal": "structural", "p_ai": 1.0, "evidence": {...}},
-    "llm_judge":  {"signal": "llm_judge",  "p_ai": 0.8, "evidence": {"rationale": "..."}}
-  }
-}
-```
+(Full narrative + detailed diagram in [planning.md](./planning.md#architecture).)
 
 ---
 
